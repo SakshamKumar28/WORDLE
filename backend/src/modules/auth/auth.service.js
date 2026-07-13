@@ -3,23 +3,20 @@ import { ApiError } from "../../utils/apiError.js";
 import { apiResponse } from "../../utils/apiResponse.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import { accessToken, refreshToken } from "../../config/config.js";
+import { accessTokenSecret, refreshTokenSecret } from "../../config/config.js";
 
 class AuthService {
     async registerUser({ firstName, lastName = "", email, password }) {
         try {
-            // 1. Basic Validation
             if (!firstName || !email || !password) {
                 throw new ApiError(400, "First name, email, and password are required");
             }
 
-            // 2. Check for existing user (Added await)
-            const existingUser = await authRepo.findUserByEmail({ email });
+            const existingUser = await authRepo.findUserByEmail(email);
             if (existingUser) {
                 throw new ApiError(400, "User with this email already exists");
             }
 
-            // 3. Hash Password
             const salt = await bcrypt.genSalt(12);
             const hashedPassword = await bcrypt.hash(password, salt);
 
@@ -27,18 +24,15 @@ class AuthService {
                 firstName,
                 lastName,
                 email,
-                password: hashedPassword
+                password: hashedPassword,
             };
 
-            // 4. Create User (Added await and fixed method name)
             const newUser = await authRepo.createUser(data);
 
-            // 5. Return the formatted response (Fixed object syntax)
-            return apiResponse(201, { 
-                firstName: newUser.firstName, 
-                email: newUser.email 
+            return apiResponse(201, {
+                firstName: newUser.firstName,
+                email: newUser.email,
             }, "User successfully created");
-
         } catch (err) {
             if (err instanceof ApiError) {
                 throw err;
@@ -53,8 +47,7 @@ class AuthService {
                 throw new ApiError(400, "Email and Password are required");
             }
 
-            const user = await authRepo.findUserByEmail({ email });
-            // Using 401 for both missing user and bad password prevents email enumeration
+            const user = await authRepo.findUserByEmail(email);
             if (!user) {
                 throw new ApiError(401, "Invalid Credentials");
             }
@@ -64,28 +57,121 @@ class AuthService {
                 throw new ApiError(401, "Invalid Credentials");
             }
 
-            // Fixed object shorthand syntax and used environment variables
-            const accessToken = jwt.sign(
-                { email: user.email, id: user._id }, 
-                process.env.ACCESS_TOKEN_SECRET, 
-                { expiresIn: '15m' }
-            );
+            const accessToken = this.generateAccessToken(user);
+            const refreshToken = this.generateRefreshToken(user);
+            const refreshTokenHash = await bcrypt.hash(refreshToken, 12);
 
-            const refreshToken = jwt.sign(
-                { email: user.email, id: user._id }, 
-                process.env.REFRESH_TOKEN_SECRET, 
-                { expiresIn: '7d' }
-            );
+            await authRepo.updateUserById(user._id, { refreshToken: refreshTokenHash });
 
-            // Return the tokens and user data back to the controller
             return { user, accessToken, refreshToken };
-
-        } catch (error) { // Fixed 'err' to 'error'
+        } catch (error) {
             if (error instanceof ApiError) {
                 throw error;
             }
-            throw new ApiError(500, "Internal Server Error during login"); // Fixed message
+            throw new ApiError(500, "Internal Server Error during login");
         }
+    }
+
+    async logoutUser(req) {
+        try {
+            const refreshTokenValue = this.extractRefreshToken(req);
+            const accessTokenValue = this.extractAccessToken(req);
+
+            let userId = null;
+
+            if (refreshTokenValue) {
+                try {
+                    const decodedRefreshToken = jwt.verify(refreshTokenValue, refreshTokenSecret);
+                    userId = decodedRefreshToken.sub || decodedRefreshToken.id;
+                } catch {
+                    userId = null;
+                }
+            }
+
+            if (!userId && accessTokenValue) {
+                try {
+                    const decodedAccessToken = jwt.verify(accessTokenValue, accessTokenSecret);
+                    userId = decodedAccessToken.sub || decodedAccessToken.id;
+                } catch {
+                    userId = null;
+                }
+            }
+
+            if (userId) {
+                await authRepo.updateUserById(userId, { refreshToken: null });
+            }
+
+            return true;
+        } catch (error) {
+            if (error instanceof ApiError) {
+                throw error;
+            }
+            throw new ApiError(500, "Internal Server Error during logout");
+        }
+    }
+
+    async refreshAccessToken(req) {
+        try {
+            const refreshTokenValue = this.extractRefreshToken(req);
+            if (!refreshTokenValue) {
+                throw new ApiError(401, "Refresh token required");
+            }
+
+            let decodedRefreshToken;
+            try {
+                decodedRefreshToken = jwt.verify(refreshTokenValue, refreshTokenSecret);
+            } catch {
+                throw new ApiError(401, "Invalid or expired refresh token");
+            }
+
+            const user = await authRepo.findUserById(decodedRefreshToken.sub || decodedRefreshToken.id);
+            if (!user || !user.refreshToken) {
+                throw new ApiError(401, "Session expired. Please login again");
+            }
+
+            const isValidRefreshToken = await bcrypt.compare(refreshTokenValue, user.refreshToken);
+            if (!isValidRefreshToken) {
+                await authRepo.updateUserById(user._id, { refreshToken: null });
+                throw new ApiError(401, "Session expired. Please login again");
+            }
+
+            const accessToken = this.generateAccessToken(user);
+            const newRefreshToken = this.generateRefreshToken(user);
+            const refreshTokenHash = await bcrypt.hash(newRefreshToken, 12);
+
+            await authRepo.updateUserById(user._id, { refreshToken: refreshTokenHash });
+
+            return { user, accessToken, refreshToken: newRefreshToken };
+        } catch (error) {
+            if (error instanceof ApiError) {
+                throw error;
+            }
+            throw new ApiError(500, "Internal Server Error during token refresh");
+        }
+    }
+
+    generateAccessToken(user) {
+        return jwt.sign(
+            { sub: user._id, email: user.email },
+            accessTokenSecret,
+            { expiresIn: "15m" },
+        );
+    }
+
+    generateRefreshToken(user) {
+        return jwt.sign(
+            { sub: user._id },
+            refreshTokenSecret,
+            { expiresIn: "7d" },
+        );
+    }
+
+    extractAccessToken(req) {
+        return req.cookies?.accessToken || req.headers.authorization?.replace(/^Bearer\s+/i, "");
+    }
+
+    extractRefreshToken(req) {
+        return req.cookies?.refreshToken || req.body?.refreshToken;
     }
 }
 

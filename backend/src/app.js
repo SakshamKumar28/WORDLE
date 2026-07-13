@@ -1,5 +1,6 @@
 import express from "express";
-import cors from "cors"; 
+import cors from "cors";
+import cookieParser from "cookie-parser";
 import authRoutes from "./modules/auth/auth.route.js";
 import limiter from "./utils/rateLimiter.js";
 
@@ -11,11 +12,12 @@ const app = express();
  */
 // Allows your frontend to communicate with this backend securely
 app.use(cors({
-    origin: 'http://localhost:5173', 
-    credentials: true
+    origin: process.env.CORS_ORIGIN || "http://localhost:5173",
+    credentials: true,
 }));
 
 app.use(express.json());
+app.use(cookieParser());
 // Good practice to include this alongside express.json() for form submissions
 app.use(express.urlencoded({ extended: true })); 
 

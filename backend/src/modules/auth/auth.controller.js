@@ -1,58 +1,112 @@
 import authService from "./auth.service.js";
+import { apiResponse } from "../../utils/apiResponse.js";
 
 class AuthController {
-    // 1. Added 'next' to the parameters
+    constructor() {
+        this.registerUser = this.registerUser.bind(this);
+        this.loginUser = this.loginUser.bind(this);
+        this.logoutUser = this.logoutUser.bind(this);
+        this.getCurrentUser = this.getCurrentUser.bind(this);
+        this.refreshAccessToken = this.refreshAccessToken.bind(this);
+    }
+
     async registerUser(req, res, next) {
         try {
-            // 2. Await the service and capture the formatted response
             const response = await authService.registerUser(req.body);
-
-            // 3. Send it back to the client using the Express 'res' object
             res.status(response.status).json(response);
-
         } catch (error) {
-            // 4. Catch any errors (like the ApiError from the service) 
             next(error);
         }
     }
 
     async loginUser(req, res, next) {
         try {
-            // 1. Get tokens from the service
             const { user, accessToken, refreshToken } = await authService.loginUser(req.body);
+            this.setAuthCookies(res, accessToken, refreshToken);
 
-            // 2. Define secure cookie options
-            const cookieOptions = {
-                httpOnly: true, // Prevents JavaScript (XSS) from reading the cookie
-                secure: process.env.NODE_ENV === "production", // Requires HTTPS in production
-                sameSite: "strict", // Prevents CSRF attacks
-            };
-
-            // 3. Attach cookies to the response
-            res.cookie("accessToken", accessToken, {
-                ...cookieOptions,
-                maxAge: 15 * 60 * 1000, // 15 minutes in milliseconds
-            });
-
-            res.cookie("refreshToken", refreshToken, {
-                ...cookieOptions,
-                maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days in milliseconds
-            });
-
-            // 4. Send the sanitized user data
             const response = apiResponse(200, {
-                id: user._id,
-                firstName: user.firstName,
-                email: user.email
+                user: {
+                    id: user._id,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
+                    email: user.email,
+                },
             }, "Login successful");
 
             res.status(200).json(response);
-
         } catch (error) {
             next(error);
         }
     }
+
+    async logoutUser(req, res, next) {
+        try {
+            await authService.logoutUser(req);
+            this.clearAuthCookies(res);
+            res.status(200).json(apiResponse(200, null, "Logout successful"));
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    async getCurrentUser(req, res, next) {
+        try {
+            res.status(200).json(apiResponse(200, {
+                user: req.user,
+            }, "User fetched successfully"));
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    async refreshAccessToken(req, res, next) {
+        try {
+            const { user, accessToken, refreshToken } = await authService.refreshAccessToken(req);
+            this.setAuthCookies(res, accessToken, refreshToken);
+
+            res.status(200).json(apiResponse(200, {
+                user: {
+                    id: user._id,
+                    firstName: user.firstName,
+                    lastName: user.lastName,
+                    email: user.email,
+                },
+            }, "Token refreshed successfully"));
+        } catch (error) {
+            next(error);
+        }
+    }
+
+    setAuthCookies(res, accessToken, refreshToken) {
+        const cookieOptions = {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
+            path: "/",
+        };
+
+        res.cookie("accessToken", accessToken, {
+            ...cookieOptions,
+            maxAge: 15 * 60 * 1000,
+        });
+
+        res.cookie("refreshToken", refreshToken, {
+            ...cookieOptions,
+            maxAge: 7 * 24 * 60 * 60 * 1000,
+        });
+    }
+
+    clearAuthCookies(res) {
+        const cookieOptions = {
+            httpOnly: true,
+            secure: process.env.NODE_ENV === "production",
+            sameSite: "lax",
+            path: "/",
+        };
+
+        res.clearCookie("accessToken", cookieOptions);
+        res.clearCookie("refreshToken", cookieOptions);
+    }
 }
 
-// Export a single instance of the controller
 export default new AuthController();
