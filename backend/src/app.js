@@ -3,6 +3,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import authRoutes from "./modules/auth/auth.route.js";
 import limiter from "./utils/rateLimiter.js";
+import morgan from "morgan";
 
 // Initialization of Express Server
 const app = express();
@@ -20,6 +21,7 @@ app.use(express.json());
 app.use(cookieParser());
 // Good practice to include this alongside express.json() for form submissions
 app.use(express.urlencoded({ extended: true })); 
+app.use(morgan("dev"));
 
 // Health Check route
 app.get('/health', (req, res) => {
