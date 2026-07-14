@@ -11,7 +11,7 @@ class AuthRepository{
         return await User.findById(id);
     }
     async updateUserById(id, data){
-        return await User.findByIdAndUpdate(id, data, { new: true });
+        return await User.findByIdAndUpdate(id, data, { returnDocument: "after" });
     }
     async updateUserByEmail(email, data){
         return await User.updateOne({ email }, data);

@@ -31,6 +31,8 @@ class AuthController {
                     lastName: user.lastName,
                     email: user.email,
                 },
+                accessToken,
+                refreshToken,
             }, "Login successful");
 
             res.status(200).json(response);
@@ -80,8 +82,8 @@ class AuthController {
     setAuthCookies(res, accessToken, refreshToken) {
         const cookieOptions = {
             httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: "lax",
+            secure: true,
+            sameSite: "none",
             path: "/",
         };
 
@@ -99,8 +101,8 @@ class AuthController {
     clearAuthCookies(res) {
         const cookieOptions = {
             httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
-            sameSite: "lax",
+            secure: true,
+            sameSite: "none",
             path: "/",
         };
 
