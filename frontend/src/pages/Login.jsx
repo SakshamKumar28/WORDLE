@@ -53,7 +53,6 @@ const Login = () => {
       // Sticking strictly to your v1 routing spec
       const response = await api.post('/v1/auth/login', { email, password });
       toast.success('Login successful!');
-      console.log('Login successful:', response);
       navigate('/dashboard');
     } catch (error) {
       console.error('Authentication Error:', error);
