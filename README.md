@@ -4,7 +4,6 @@
 
 The classic 5-letter word game, rebuilt as a live head-to-head duel. Authenticated players can jump into random matchmaking or spin up a private lobby with a shareable room code, then watch every guess resolve in real time — including their rival's tile colors (but not their letters), for a "fog of war" competitive feel.
 
-> This README was generated from a direct analysis of the repository source (backend + frontend), since the original README only contained a title. It documents the app as it is currently implemented.
 
 ---
 
