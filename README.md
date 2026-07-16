@@ -273,17 +273,6 @@ No `.env.example` file currently exists in the repo — you'll need to create th
 
 ---
 
-## 📝 Notes & Known Limitations
-
-A few things worth knowing if you plan to extend or deploy this project, based on reading the current implementation:
-
-- **In-memory match state**: `waitingPlayer`, `activeRooms`, and `customLobbies` live in a JS `Map`/variable inside `socketHandler.js`. This means matchmaking state is lost on server restart and won't work correctly if you scale the backend to multiple instances without adding shared state (e.g. Redis).
-- **`stats.rank` and `dailyChallenges` are schema-only**: the `User` model defines a `rank` field (shown on the Dashboard) and `dailyChallenges.fastWins` / `speedDuelsWon`, but no backend logic currently updates them — only `gamesPlayed`, `wins`, and `winStreak` are incremented after a match.
-- **Auth cookies use `secure: true` / `sameSite: "none"`**, which requires HTTPS in production; this will silently fail to set cookies over plain `http://localhost` in some browsers unless testing over `https`.
-- **Random matchmaking is explicitly commented `(Legacy)`** in the source in favor of the newer custom-lobby flow, though both remain functional.
-- No password reset, email verification, or account deletion flow currently exists.
-
----
 
 ## 📄 License
 
