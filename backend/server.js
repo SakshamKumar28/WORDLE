@@ -20,7 +20,7 @@ async function startServer() {
   await connectDB(); 
 
   // Pass the io instance to your handler module
-  setupSocket(io);
+  await setupSocket(io);
   
   server.listen(port || 3000, () => {
     console.log(`Server is running on port : ${port || 3000}`);

@@ -2,217 +2,380 @@ import { getRandomWord, checkGuess } from "../utils/gameLogic.js";
 import User from "../modules/user/user.model.js";
 import Room from "../modules/user/room.model.js";
 import { nanoid } from "nanoid";
+import { z } from "zod";
+import { createAdapter } from "@socket.io/redis-adapter";
+import { createClient } from "redis";
+import { initRedis, redisClient } from "../lib/redis.js";
 
-// State
-let waitingPlayer = null; 
-const activeRooms = new Map(); // For random matchmaking
-const customLobbies = new Map(); // For custom lobbies
+const RECONNECT_GRACE_SECONDS = 60;
+const makeRoomKey = (roomId) => `room:${roomId}`;
+const makeLobbyKey = (roomCode) => `lobby:${roomCode}`;
+const makeDisconnectedKey = (socketId) => `disconnected:${socketId}`;
+const makeWaitingKey = () => `matchmaking:waitingPlayer`;
 
-export const setupSocket = (io) => {
-  
+const guessSchema = z.object({
+  roomId: z.string().min(1),
+  guess: z.string().length(5).regex(/^[A-Za-z]{5}$/, {
+    message: "Guess must be exactly 5 alphabetic letters"
+  })
+});
+
+const normalizePlayer = ({ socketId, userId, firstName }) => ({ socketId, userId, firstName, connected: true });
+
+const loadRoom = async (roomId) => {
+  const data = await redisClient.hGetAll(makeRoomKey(roomId));
+  if (!data || Object.keys(data).length === 0) return null;
+  return {
+    roomId,
+    secretWord: data.secretWord,
+    status: data.status,
+    players: JSON.parse(data.players || "[]")
+  };
+};
+
+const saveRoom = async (room) => {
+  await redisClient.hSet(makeRoomKey(room.roomId), {
+    roomId: room.roomId,
+    secretWord: room.secretWord,
+    status: room.status,
+    players: JSON.stringify(room.players)
+  });
+};
+
+const deleteRoom = async (roomId) => await redisClient.del(makeRoomKey(roomId));
+
+const loadLobby = async (roomCode) => {
+  const data = await redisClient.hGetAll(makeLobbyKey(roomCode));
+  if (!data || Object.keys(data).length === 0) return null;
+  return {
+    roomId: roomCode,
+    host: data.host,
+    status: data.status,
+    secretWord: data.secretWord || null,
+    players: JSON.parse(data.players || "[]")
+  };
+};
+
+const saveLobby = async (lobby) => {
+  await redisClient.hSet(makeLobbyKey(lobby.roomId), {
+    roomId: lobby.roomId,
+    host: lobby.host,
+    status: lobby.status,
+    secretWord: lobby.secretWord || "",
+    players: JSON.stringify(lobby.players)
+  });
+};
+
+const deleteLobby = async (roomCode) => await redisClient.del(makeLobbyKey(roomCode));
+
+const scheduleDisconnectCleanup = async (roomId, disconnectedSocketId) => {
+  const disconnectedKey = makeDisconnectedKey(disconnectedSocketId);
+  const byeInMs = RECONNECT_GRACE_SECONDS * 1000;
+
+  await redisClient.expire(disconnectedKey, RECONNECT_GRACE_SECONDS);
+
+  setTimeout(async () => {
+    const exists = await redisClient.exists(disconnectedKey);
+    if (!exists) return;
+
+    const room = await loadRoom(roomId);
+    if (!room || room.status !== "playing") {
+      await redisClient.del(disconnectedKey);
+      return;
+    }
+
+    const disconnectedPlayer = room.players.find((player) => player.socketId === disconnectedSocketId);
+    if (!disconnectedPlayer || disconnectedPlayer.connected !== false) {
+      await redisClient.del(disconnectedKey);
+      return;
+    }
+
+    const remainingPlayer = room.players.find((player) => player.socketId !== disconnectedSocketId && player.connected !== false);
+    if (!remainingPlayer) {
+      await redisClient.del(disconnectedKey);
+      return;
+    }
+
+    await redisClient.del(disconnectedKey);
+    io.to(roomId).emit("gameOver", {
+      winner: remainingPlayer.socketId,
+      reason: "opponentDisconnected",
+      word: room.secretWord
+    });
+    await handleGameEnd(roomId, room, remainingPlayer.socketId);
+  }, byeInMs);
+};
+
+const handleGameEnd = async (roomId, room, winnerSocketId) => {
+  try {
+    for (const player of room.players) {
+      if (!player.userId) continue;
+      if (player.socketId === winnerSocketId) {
+        await User.findByIdAndUpdate(player.userId, {
+          $inc: { "stats.wins": 1, "stats.winStreak": 1, "stats.gamesPlayed": 1 }
+        });
+      } else {
+        await User.findByIdAndUpdate(player.userId, {
+          $set: { "stats.winStreak": 0 },
+          $inc: { "stats.gamesPlayed": 1 }
+        });
+      }
+    }
+  } catch (err) {
+    console.error("Failed to update stats after game end", err);
+  }
+
+  await deleteRoom(roomId);
+  await Room.deleteOne({ roomId });
+};
+
+let io;
+
+export const setupSocket = async (serverIo) => {
+  io = serverIo;
+  await initRedis();
+
+  const pubClient = createClient({ url: process.env.REDIS_URL || "redis://localhost:6379" });
+  const subClient = pubClient.duplicate();
+  await Promise.all([pubClient.connect(), subClient.connect()]);
+  io.adapter(createAdapter(pubClient, subClient));
+
   io.on("connection", (socket) => {
     console.log(`🟢 User Connected : ${socket.id}`);
 
-    // Store user info on socket
-    socket.on('setUserId', ({ userId, firstName }) => {
-        socket.userId = userId;
-        socket.firstName = firstName;
+    socket.on("setUserId", ({ userId, firstName }) => {
+      socket.userId = userId;
+      socket.firstName = firstName;
     });
 
-    // --- RANDOM MATCHMAKING LOGIC (Legacy) ---
-    socket.on('joinQueue', async ({ userId }) => {
-      socket.userId = userId; // also bind here
+    socket.on("joinQueue", async ({ userId }) => {
+      socket.userId = userId;
+      const waitingPlayerId = await redisClient.get(makeWaitingKey());
 
-      if (waitingPlayer && waitingPlayer.id !== socket.id) {
-        const player1 = waitingPlayer;
-        const player2 = socket;
-        const roomId = `room_${player1.id}_${player2.id}`;
-        
-        waitingPlayer = null;
-        player1.join(roomId);
-        player2.join(roomId);
-
-        const secretWord = getRandomWord();
-        activeRooms.set(roomId, { 
-          player1: { socketId: player1.id, userId: player1.userId }, 
-          player2: { socketId: player2.id, userId: player2.userId }, 
-          secretWord 
-        });
-
-        try {
-            await Room.create({
-                roomId,
-                players: [player1.userId, player2.userId].filter(Boolean),
-                secretWord
-            });
-        } catch (err) {
-            console.error("Failed to create room in DB", err);
+      if (waitingPlayerId && waitingPlayerId !== socket.id) {
+        const waitingSocket = io.sockets.sockets.get(waitingPlayerId);
+        if (!waitingSocket) {
+          await redisClient.del(makeWaitingKey());
+          socket.emit("waitingForOpponent");
+          return;
         }
 
-        io.to(roomId).emit('matchFound', { 
+        const roomId = `room_${waitingSocket.id}_${socket.id}`;
+        waitingSocket.join(roomId);
+        socket.join(roomId);
+
+        const secretWord = getRandomWord();
+        const room = {
+          roomId,
+          status: "playing",
+          secretWord,
+          players: [
+            normalizePlayer({ socketId: waitingSocket.id, userId: waitingSocket.userId, firstName: waitingSocket.firstName }),
+            normalizePlayer({ socketId: socket.id, userId: socket.userId, firstName: socket.firstName })
+          ]
+        };
+
+        await saveRoom(room);
+        await redisClient.del(makeWaitingKey());
+
+        try {
+          await Room.create({
             roomId,
-            players: [
-                { socketId: player1.id, userId: player1.userId, firstName: player1.firstName },
-                { socketId: player2.id, userId: player2.userId, firstName: player2.firstName }
-            ]
-        });
-        console.log(`⚔️ Match started in ${roomId}. Secret word is ${secretWord}`);
+            players: room.players.map((player) => player.userId).filter(Boolean),
+            secretWord
+          });
+        } catch (err) {
+          console.error("Failed to create room in DB", err);
+        }
+
+        io.to(roomId).emit("matchFound", { roomId, players: room.players });
       } else {
-        waitingPlayer = socket;
-        socket.emit('waitingForOpponent');
+        await redisClient.set(makeWaitingKey(), socket.id, { EX: RECONNECT_GRACE_SECONDS });
+        socket.emit("waitingForOpponent");
       }
     });
 
-    // --- CUSTOM LOBBY LOGIC ---
-    socket.on('createCustomLobby', ({ userId, firstName }) => {
+    socket.on("createCustomLobby", async ({ userId, firstName }) => {
       socket.userId = userId;
       socket.firstName = firstName;
       const roomCode = nanoid(6).toUpperCase();
-      
-      customLobbies.set(roomCode, {
-          roomId: roomCode,
-          host: socket.id,
-          players: [{ socketId: socket.id, userId, firstName }],
-          status: 'waiting',
-          secretWord: null
-      });
+      const lobby = {
+        roomId: roomCode,
+        host: socket.id,
+        status: "waiting",
+        secretWord: null,
+        players: [normalizePlayer({ socketId: socket.id, userId, firstName })]
+      };
 
+      await saveLobby(lobby);
       socket.join(roomCode);
-      socket.emit('customLobbyCreated', { roomCode, players: customLobbies.get(roomCode).players });
+      socket.emit("customLobbyCreated", { roomCode, players: lobby.players });
     });
 
-    socket.on('joinCustomLobby', ({ roomCode, userId, firstName }) => {
+    socket.on("joinCustomLobby", async ({ roomCode, userId, firstName }) => {
       socket.userId = userId;
       socket.firstName = firstName;
-      
-      const lobby = customLobbies.get(roomCode);
+      const lobby = await loadLobby(roomCode);
       if (!lobby) {
-          socket.emit('customLobbyError', { message: "Invalid Room Code" });
-          return;
+        socket.emit("customLobbyError", { message: "Invalid Room Code" });
+        return;
       }
-      if (lobby.status !== 'waiting') {
-          socket.emit('customLobbyError', { message: "Match already in progress" });
-          return;
+      if (lobby.status !== "waiting") {
+        socket.emit("customLobbyError", { message: "Match already in progress" });
+        return;
       }
 
-      // Check if already in lobby to prevent duplicates
-      if (!lobby.players.find(p => p.socketId === socket.id)) {
-          lobby.players.push({ socketId: socket.id, userId, firstName });
+      if (!lobby.players.some((player) => player.socketId === socket.id)) {
+        lobby.players.push(normalizePlayer({ socketId: socket.id, userId, firstName }));
       }
+      await saveLobby(lobby);
 
       socket.join(roomCode);
-      io.to(roomCode).emit('lobbyUpdated', { players: lobby.players, host: lobby.host });
+      io.to(roomCode).emit("lobbyUpdated", { players: lobby.players, host: lobby.host });
     });
 
-    socket.on('startCustomMatch', async ({ roomCode }) => {
-      const lobby = customLobbies.get(roomCode);
+    socket.on("startCustomMatch", async ({ roomCode }) => {
+      const lobby = await loadLobby(roomCode);
       if (!lobby || lobby.host !== socket.id) return;
 
       const secretWord = getRandomWord();
       lobby.secretWord = secretWord;
-      lobby.status = 'playing';
+      lobby.status = "playing";
+      await saveLobby(lobby);
+
+      const room = {
+        roomId: roomCode,
+        status: "playing",
+        secretWord,
+        players: lobby.players
+      };
+      await saveRoom(room);
 
       try {
-          await Room.create({
-              roomId: roomCode,
-              players: lobby.players.map(p => p.userId).filter(Boolean),
-              secretWord
-          });
+        await Room.create({
+          roomId: roomCode,
+          players: room.players.map((player) => player.userId).filter(Boolean),
+          secretWord
+        });
       } catch (err) {
-          console.error("Failed to create custom room in DB", err);
+        console.error("Failed to create custom room in DB", err);
       }
 
-      // We use matchFound to trigger the transition to GameBoard
-      io.to(roomCode).emit('matchFound', { roomId: roomCode, players: lobby.players });
+      io.to(roomCode).emit("matchFound", { roomId: roomCode, players: lobby.players });
     });
 
-    // --- SHARED GAMEPLAY LOGIC ---
-    socket.on('submitGuess', async ({ roomId, guess }) => {
-      // Find room in either random or custom maps
-      let room = activeRooms.get(roomId);
-      let isCustom = false;
-      if (!room) {
-          room = customLobbies.get(roomId);
-          isCustom = true;
+    socket.on("submitGuess", async (payload) => {
+      const parseResult = guessSchema.safeParse(payload);
+      if (!parseResult.success) {
+        socket.emit("validationError", { errors: parseResult.error.errors });
+        return;
       }
-      if (!room) return;
+
+      const { roomId, guess } = parseResult.data;
+      const room = await loadRoom(roomId);
+      if (!room || room.status !== "playing") {
+        socket.emit("gameError", { message: "Invalid or inactive room." });
+        return;
+      }
 
       const feedback = checkGuess(guess, room.secretWord);
-      
-      io.to(roomId).emit('guessEvaluated', {
-        playerId: socket.id, // we use socket.id as unique player ID in gameboard
-        guess,
-        feedback
-      });
+      io.to(roomId).emit("guessEvaluated", { playerId: socket.id, guess, feedback });
 
       if (guess.toUpperCase() === room.secretWord.toUpperCase()) {
-        const winnerSocketId = socket.id;
-        
-        io.to(roomId).emit('gameOver', { 
-          winner: socket.id, 
-          word: room.secretWord 
-        });
-
-        try {
-            // Process stats
-            if (isCustom) {
-                // Custom Lobby: N players
-                for (const player of room.players) {
-                    if (!player.userId) continue;
-                    if (player.socketId === winnerSocketId) {
-                        await User.findByIdAndUpdate(player.userId, {
-                            $inc: { "stats.wins": 1, "stats.winStreak": 1, "stats.gamesPlayed": 1 }
-                        });
-                    } else {
-                        await User.findByIdAndUpdate(player.userId, {
-                            $set: { "stats.winStreak": 0 },
-                            $inc: { "stats.gamesPlayed": 1 }
-                        });
-                    }
-                }
-                customLobbies.delete(roomId);
-            } else {
-                // Random Matchmaking: 2 players
-                const isPlayer1Winner = room.player1.socketId === winnerSocketId;
-                const winnerUserId = isPlayer1Winner ? room.player1.userId : room.player2.userId;
-                const loserUserId = isPlayer1Winner ? room.player2.userId : room.player1.userId;
-
-                if (winnerUserId) {
-                    await User.findByIdAndUpdate(winnerUserId, {
-                        $inc: { "stats.wins": 1, "stats.winStreak": 1, "stats.gamesPlayed": 1 }
-                    });
-                }
-                if (loserUserId) {
-                    await User.findByIdAndUpdate(loserUserId, {
-                        $set: { "stats.winStreak": 0 },
-                        $inc: { "stats.gamesPlayed": 1 }
-                    });
-                }
-                activeRooms.delete(roomId);
-            }
-
-            // Delete room from DB
-            await Room.deleteOne({ roomId });
-        } catch (err) {
-            console.error("Failed to update stats or delete room", err);
-        }
+        io.to(roomId).emit("gameOver", { winner: socket.id, word: room.secretWord });
+        await handleGameEnd(roomId, room, socket.id);
       }
     });
 
-    socket.on("disconnect", () => {
-      console.log(`🔴 User Disconnected : ${socket.id}`);
-      if (waitingPlayer && waitingPlayer.id === socket.id) {
-        waitingPlayer = null;
+    socket.on("reconnectToGame", async ({ previousSocketId }) => {
+      const disconnectedKey = makeDisconnectedKey(previousSocketId);
+      const disconnectData = await redisClient.hGetAll(disconnectedKey);
+      if (!disconnectData || Object.keys(disconnectData).length === 0) {
+        socket.emit("reconnectFailed", { message: "No active grace session found." });
+        return;
       }
-      
-      // Cleanup custom lobbies if a player disconnects
-      for (const [code, lobby] of customLobbies.entries()) {
-          lobby.players = lobby.players.filter(p => p.socketId !== socket.id);
-          if (lobby.players.length === 0) {
-              customLobbies.delete(code);
-          } else {
-              io.to(code).emit('lobbyUpdated', { players: lobby.players, host: lobby.host });
-          }
+
+      const roomId = disconnectData.roomId;
+      const room = await loadRoom(roomId);
+      if (!room || room.status !== "playing") {
+        socket.emit("reconnectFailed", { message: "Game is no longer active." });
+        return;
+      }
+
+      room.players = room.players.map((player) => {
+        if (player.socketId === previousSocketId) {
+          return normalizePlayer({ socketId: socket.id, userId: disconnectData.userId || player.userId, firstName: player.firstName });
+        }
+        return player;
+      });
+
+      await saveRoom(room);
+      socket.join(roomId);
+      await redisClient.del(disconnectedKey);
+
+      io.to(roomId).emit("playerReconnected", { roomId, socketId: socket.id, previousSocketId });
+      socket.emit("reconnected", { roomId, players: room.players });
+    });
+
+    socket.on("disconnect", async (reason) => {
+      console.log(`🔴 User Disconnected : ${socket.id}`);
+      const waitingPlayerId = await redisClient.get(makeWaitingKey());
+      if (waitingPlayerId === socket.id) {
+        await redisClient.del(makeWaitingKey());
+      }
+
+      const roomKeyIterator = redisClient.scanIterator({ MATCH: "room:*" });
+      for await (const key of roomKeyIterator) {
+        const roomId = key.replace("room:", "");
+        const room = await loadRoom(roomId);
+        if (!room || room.status !== "playing") continue;
+
+        const player = room.players.find((player) => player.socketId === socket.id);
+        if (!player) continue;
+
+        player.connected = false;
+        await saveRoom(room);
+
+        const remainingPlayer = room.players.find((p) => p.socketId !== socket.id && p.connected !== false);
+        if (!remainingPlayer) {
+          await deleteRoom(roomId);
+          await Room.deleteOne({ roomId });
+          break;
+        }
+
+        await redisClient.hSet(makeDisconnectedKey(socket.id), {
+          roomId,
+          socketId: socket.id,
+          userId: socket.userId || ""
+        });
+        await redisClient.expire(makeDisconnectedKey(socket.id), RECONNECT_GRACE_SECONDS);
+
+        io.to(roomId).emit("playerDisconnected", { socketId: socket.id, reason });
+        scheduleDisconnectCleanup(roomId, socket.id).catch((err) => console.error(err));
+        break;
+      }
+
+      const lobbyKeyIterator = redisClient.scanIterator({ MATCH: "lobby:*" });
+      for await (const key of lobbyKeyIterator) {
+        const roomCode = key.replace("lobby:", "");
+        const lobby = await loadLobby(roomCode);
+        if (!lobby) continue;
+
+        const playerIndex = lobby.players.findIndex((player) => player.socketId === socket.id);
+        if (playerIndex === -1) continue;
+
+        lobby.players.splice(playerIndex, 1);
+        if (lobby.host === socket.id && lobby.players.length > 0) {
+          lobby.host = lobby.players[0].socketId;
+        }
+
+        if (lobby.players.length === 0) {
+          await deleteLobby(roomCode);
+        } else {
+          await saveLobby(lobby);
+          io.to(roomCode).emit("lobbyUpdated", { players: lobby.players, host: lobby.host });
+        }
+        break;
       }
     });
   });
