@@ -273,6 +273,38 @@ No `.env.example` file currently exists in the repo — you'll need to create th
 
 ---
 
+## 🐳 Docker Deployment
+
+This repo includes a `docker-compose.yml` file that starts the full stack locally:
+- `frontend` served by Nginx on `http://localhost`
+- `backend` on `http://localhost:3000`
+- `mongo` on port `27017`
+- `redis` on port `6379`
+
+### Run with Docker Compose
+
+From the repository root:
+
+```bash
+docker-compose up --build
+```
+
+Then open:
+- `http://localhost` → frontend
+- `http://localhost:3000/health` → backend health check
+
+### Environment variables for Docker
+
+The compose file already wires these values for local development:
+- `MONGODB_URL=mongodb://mongo:27017/wordle`
+- `REDIS_URL=redis://redis:6379`
+- `PORT=3000`
+- `CORS_ORIGIN=http://localhost`
+- `VITE_API_URL=http://backend:3000/api`
+
+> For production or custom setups, replace the defaults in `docker-compose.yml` or provide a `.env` file to the compose process.
+
+---
 
 ## 📄 License
 
