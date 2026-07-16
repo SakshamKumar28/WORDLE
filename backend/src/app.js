@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import cookieParser from "cookie-parser";
 import authRoutes from "./modules/auth/auth.route.js";
+import userRoutes from "./modules/user/user.route.js";
 import limiter from "./utils/rateLimiter.js";
 import morgan from "morgan";
 
@@ -33,6 +34,7 @@ app.get('/health', (req, res) => {
  */
 // I added /v1/ here! It's a great habit to version your APIs right from the start.
 app.use('/api/v1/auth', limiter, authRoutes);
+app.use('/api/v1/user', limiter, userRoutes);
 
 /**
  * @describe Global Error Handling Middleware

@@ -28,6 +28,8 @@ export const authenticate = async (req, res, next) => {
             firstName: user.firstName,
             lastName: user.lastName,
             email: user.email,
+            stats: user.stats,
+            dailyChallenges: user.dailyChallenges
         };
 
         next();

@@ -26,7 +26,21 @@ const userSchema = new mongoose.Schema({
         type: String,
         default: null,
     },
-
+    friends: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User"
+    }],
+    stats: {
+        gamesPlayed: { type: Number, default: 0 },
+        wins: { type: Number, default: 0 },
+        winStreak: { type: Number, default: 0 },
+        rank: { type: String, default: "Bronze V" }
+    },
+    dailyChallenges: {
+        lastReset: { type: Date, default: Date.now },
+        fastWins: { type: Number, default: 0 },     // e.g. Solve words in less than 4 tries
+        speedDuelsWon: { type: Number, default: 0 } // e.g. Win 5 speed-duels in active matchmaking
+    }
 }, {timestamps: true});
 
 const User = mongoose.model("User", userSchema);
