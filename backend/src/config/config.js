@@ -1,6 +1,6 @@
 import { config } from "dotenv";
 
-config({ debug: true, encoding: "UTF-8", override: true });
+config({ debug: true, encoding: "UTF-8"});
 
 const port = Number(process.env.PORT) || 3000;
 const mongodbURL = process.env.MONGODB_URL;

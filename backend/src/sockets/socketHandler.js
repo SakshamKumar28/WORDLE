@@ -29,7 +29,8 @@ const loadRoom = async (roomId) => {
     roomId,
     secretWord: data.secretWord,
     status: data.status,
-    players: JSON.parse(data.players || "[]")
+    players: JSON.parse(data.players || "[]"),
+    guessCounts: JSON.parse(data.guessCounts || "{}")
   };
 };
 
@@ -38,7 +39,8 @@ const saveRoom = async (room) => {
     roomId: room.roomId,
     secretWord: room.secretWord,
     status: room.status,
-    players: JSON.stringify(room.players)
+    players: JSON.stringify(room.players),
+    guessCounts: JSON.stringify(room.guessCounts || {})
   });
 };
 
@@ -110,7 +112,12 @@ const handleGameEnd = async (roomId, room, winnerSocketId) => {
   try {
     for (const player of room.players) {
       if (!player.userId) continue;
-      if (player.socketId === winnerSocketId) {
+      if (winnerSocketId === null) {
+        // Draw — just increment gamesPlayed, don't touch streaks
+        await User.findByIdAndUpdate(player.userId, {
+          $inc: { "stats.gamesPlayed": 1 }
+        });
+      } else if (player.socketId === winnerSocketId) {
         await User.findByIdAndUpdate(player.userId, {
           $inc: { "stats.wins": 1, "stats.winStreak": 1, "stats.gamesPlayed": 1 }
         });
@@ -121,6 +128,23 @@ const handleGameEnd = async (roomId, room, winnerSocketId) => {
         });
       }
     }
+    // Push updated stats to each player in real-time
+    for (const player of room.players) {
+      if (!player.userId) continue;
+      const updatedUser = await User.findById(player.userId).select("stats");
+      if (updatedUser && io) {
+        io.to(`user:${player.userId}`).emit("statsUpdated", updatedUser.stats);
+      }
+    }
+
+    // Broadcast updated leaderboard to all connected users
+    if (io) {
+      const leaderboard = await User.find()
+        .sort({ "stats.wins": -1 })
+        .limit(10)
+        .select("firstName lastName stats");
+      io.emit("leaderboardUpdated", leaderboard);
+    }
   } catch (err) {
     console.error("Failed to update stats after game end", err);
   }
@@ -130,6 +154,10 @@ const handleGameEnd = async (roomId, room, winnerSocketId) => {
 };
 
 let io;
+const userSocketMap = new Map();
+
+export const getIo = () => io;
+export { userSocketMap };
 
 export const setupSocket = async (serverIo) => {
   io = serverIo;
@@ -146,6 +174,9 @@ export const setupSocket = async (serverIo) => {
     socket.on("setUserId", ({ userId, firstName }) => {
       socket.userId = userId;
       socket.firstName = firstName;
+      // Track this user's socket for real-time pushes
+      userSocketMap.set(userId, socket.id);
+      socket.join(`user:${userId}`);
     });
 
     socket.on("joinQueue", async ({ userId }) => {
@@ -278,12 +309,33 @@ export const setupSocket = async (serverIo) => {
         return;
       }
 
+      const MAX_GUESSES = 6;
+      const currentCount = (room.guessCounts[socket.id] || 0);
+      if (currentCount >= MAX_GUESSES) {
+        socket.emit("gameError", { message: "You have used all your guesses." });
+        return;
+      }
+
+      // Increment guess count
+      room.guessCounts[socket.id] = currentCount + 1;
+      await saveRoom(room);
+
       const feedback = checkGuess(guess, room.secretWord);
       io.to(roomId).emit("guessEvaluated", { playerId: socket.id, guess, feedback });
 
       if (guess.toUpperCase() === room.secretWord.toUpperCase()) {
         io.to(roomId).emit("gameOver", { winner: socket.id, word: room.secretWord });
         await handleGameEnd(roomId, room, socket.id);
+      } else if (room.guessCounts[socket.id] >= MAX_GUESSES) {
+        // Check if ALL players have exhausted their guesses
+        const allExhausted = room.players.every(
+          p => (room.guessCounts[p.socketId] || 0) >= MAX_GUESSES
+        );
+        if (allExhausted) {
+          // Game ends in a draw — no winner
+          io.to(roomId).emit("gameOver", { winner: null, reason: "draw", word: room.secretWord });
+          await handleGameEnd(roomId, room, null);
+        }
       }
     });
 
@@ -319,6 +371,10 @@ export const setupSocket = async (serverIo) => {
 
     socket.on("disconnect", async (reason) => {
       console.log(`🔴 User Disconnected : ${socket.id}`);
+      // Clean up the user-to-socket mapping
+      if (socket.userId) {
+        userSocketMap.delete(socket.userId);
+      }
       const waitingPlayerId = await redisClient.get(makeWaitingKey());
       if (waitingPlayerId === socket.id) {
         await redisClient.del(makeWaitingKey());
@@ -327,6 +383,7 @@ export const setupSocket = async (serverIo) => {
       const roomKeyIterator = redisClient.scanIterator({ MATCH: "room:*" });
       for await (const key of roomKeyIterator) {
         const roomId = key.replace("room:", "");
+        // const roomId = key.split(":")[1];
         const room = await loadRoom(roomId);
         if (!room || room.status !== "playing") continue;
 

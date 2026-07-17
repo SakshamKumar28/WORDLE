@@ -2,6 +2,7 @@ import User from "./user.model.js";
 import FriendRequest from "./friendRequest.model.js";
 import { apiResponse } from "../../utils/apiResponse.js";
 import { ApiError } from "../../utils/apiError.js";
+import { getIo } from "../../sockets/socketHandler.js";
 
 class UserController {
     async getFriends(req, res, next) {
@@ -66,6 +67,14 @@ class UserController {
                 receiver: receiver._id
             });
 
+            // Push real-time notification to receiver
+            const io = getIo();
+            if (io) {
+                const populatedRequest = await FriendRequest.findById(friendRequest._id)
+                    .populate("sender", "firstName lastName email");
+                io.to(`user:${receiver._id.toString()}`).emit("friendRequestReceived", populatedRequest);
+            }
+
             res.status(201).json(apiResponse(201, friendRequest, "Friend request sent successfully"));
         } catch (error) {
             next(error);
@@ -109,10 +118,43 @@ class UserController {
                 await User.findByIdAndUpdate(friendRequest.sender, { $addToSet: { friends: receiverId } });
                 await User.findByIdAndUpdate(receiverId, { $addToSet: { friends: friendRequest.sender } });
 
+                // Push real-time updates to both users
+                const io = getIo();
+                if (io) {
+                    const senderId = friendRequest.sender.toString();
+                    const receiverIdStr = receiverId.toString();
+
+                    // Fetch updated friends lists for both users
+                    const [updatedSender, updatedReceiver] = await Promise.all([
+                        User.findById(senderId).populate("friends", "firstName lastName email stats"),
+                        User.findById(receiverId).populate("friends", "firstName lastName email stats")
+                    ]);
+
+                    // Notify sender that their request was accepted + updated friends list
+                    io.to(`user:${senderId}`).emit("friendRequestAccepted", {
+                        requestId: friendRequest._id,
+                        acceptedBy: { _id: receiverId, firstName: updatedReceiver?.firstName, lastName: updatedReceiver?.lastName }
+                    });
+                    io.to(`user:${senderId}`).emit("friendsListUpdated", updatedSender?.friends || []);
+
+                    // Notify receiver with updated friends list
+                    io.to(`user:${receiverIdStr}`).emit("friendsListUpdated", updatedReceiver?.friends || []);
+                }
+
                 res.status(200).json(apiResponse(200, null, "Friend request accepted"));
             } else if (action === "reject") {
                 friendRequest.status = "rejected";
                 await friendRequest.save();
+
+                // Notify sender that their request was rejected
+                const io = getIo();
+                if (io) {
+                    io.to(`user:${friendRequest.sender.toString()}`).emit("friendRequestResponded", {
+                        requestId: friendRequest._id,
+                        action: "rejected"
+                    });
+                }
+
                 res.status(200).json(apiResponse(200, null, "Friend request rejected"));
             } else {
                 throw new ApiError(400, "Invalid action");
