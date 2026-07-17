@@ -79,7 +79,7 @@ const SignUp = () => {
         // Push user along to login screen upon successful registration
         navigate('/login');
       } catch (error) {
-        const errorMessage = error.response?.data?.message || 'Something went wrong. Please try again.';
+        const errorMessage = error.message || 'Something went wrong. Please try again.';
         console.error('Registration API Error:', error);
         toast.error(errorMessage);
         setApiError(errorMessage);

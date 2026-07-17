@@ -48,13 +48,17 @@ const GameBoard = ({ socket, roomId, matchPlayers = [], onLeave }) => {
     });
 
     socket.on('gameOver', (data) => {
-      setGameStatus(data.winner === socket.id ? "won" : "lost");
-      if (data.winner === socket.id) {
-        setWinnerMessage("🏆 You Won!");
+      if (data.reason === "draw" || data.winner === null) {
+        setGameStatus("draw");
+        setWinnerMessage(`Nobody cracked it! The word was ${data.word?.toUpperCase()}`);
+      } else if (data.winner === socket.id) {
+        setGameStatus("won");
+        setWinnerMessage("You cracked the word!");
       } else {
+        setGameStatus("lost");
         const winnerObj = matchPlayers.find(p => p.socketId === data.winner);
         const winnerName = winnerObj ? winnerObj.firstName : "An opponent";
-        setWinnerMessage(`💀 ${winnerName} won. Word was ${data.word}`);
+        setWinnerMessage(`${winnerName} won. The word was ${data.word?.toUpperCase()}`);
       }
     });
 
@@ -67,6 +71,7 @@ const GameBoard = ({ socket, roomId, matchPlayers = [], onLeave }) => {
   useEffect(() => {
     const handleKeyDown = (e) => {
       if (gameStatus !== "playing") return;
+      if (guesses.length >= 6) return; // Max 6 guesses allowed
 
       if (e.key === "Enter") {
         if (currentGuess.length === 5) {
@@ -81,7 +86,7 @@ const GameBoard = ({ socket, roomId, matchPlayers = [], onLeave }) => {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [currentGuess, gameStatus, roomId, socket]);
+  }, [currentGuess, guesses, gameStatus, roomId, socket]);
 
   const getFeedbackColor = (status) => {
     if (status === 'correct') return 'bg-[#6aaa64] border-[#6aaa64] text-white'; 
@@ -104,8 +109,24 @@ const GameBoard = ({ socket, roomId, matchPlayers = [], onLeave }) => {
       </div>
 
       {gameStatus !== "playing" && (
-        <div className="mb-6 px-8 py-4 bg-zinc-900 border border-zinc-700 rounded-xl font-black text-2xl text-center shadow-2xl animate-pulse z-50">
-          {winnerMessage}
+        <div className="fixed inset-0 bg-zinc-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-3xl p-8 max-w-md w-full text-center space-y-6 shadow-2xl">
+            <div className="text-6xl">
+              {gameStatus === "won" ? "🏆" : gameStatus === "draw" ? "🤝" : "💀"}
+            </div>
+            <h2 className="text-3xl font-black tracking-tight">
+              {gameStatus === "won" ? "VICTORY!" : gameStatus === "draw" ? "DRAW!" : "DEFEATED"}
+            </h2>
+            <p className="text-zinc-400 font-semibold text-sm">
+              {winnerMessage}
+            </p>
+            <button
+              onClick={onLeave}
+              className="w-full py-3.5 bg-[#6aaa64] hover:bg-[#5a9554] text-white font-black text-sm rounded-xl transition-colors shadow-lg"
+            >
+              Back to Dashboard
+            </button>
+          </div>
         </div>
       )}
 

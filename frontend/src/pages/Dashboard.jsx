@@ -46,10 +46,15 @@ const Dashboard = () => {
     
     setSocket(newSocket);
 
-    // Listen for successful connection
+    // Listen for successful connection & re-register userId on reconnect
+    let localUserData = null;
     newSocket.on('connect', () => {
       console.log('Connected to game server!');
       if (isMounted) setSocketId(newSocket.id);
+      // Re-register userId on reconnect
+      if (localUserData?.id) {
+        newSocket.emit('setUserId', { userId: localUserData.id, firstName: localUserData.firstName });
+      }
     });
 
     // --- MATCHMAKING LISTENERS ---
@@ -88,11 +93,59 @@ const Dashboard = () => {
       if (isMounted) toast.error(data.message);
     });
 
+    // --- REAL-TIME DASHBOARD LISTENERS ---
+
+    // New friend request arrived
+    newSocket.on('friendRequestReceived', (request) => {
+      if (!isMounted) return;
+      setFriendRequests(prev => {
+        // Avoid duplicates
+        if (prev.some(r => r._id === request._id)) return prev;
+        return [request, ...prev];
+      });
+      toast(`✨ New friend request from ${request.sender?.firstName || 'someone'}!`, { icon: '👋' });
+    });
+
+    // Friend request accepted by the other person (you are the sender)
+    newSocket.on('friendRequestAccepted', (data) => {
+      if (!isMounted) return;
+      toast.success(`${data.acceptedBy?.firstName || 'Your friend'} accepted your request!`);
+    });
+
+    // Friends list updated (after accept)
+    newSocket.on('friendsListUpdated', (updatedFriends) => {
+      if (!isMounted) return;
+      setFriends(updatedFriends);
+    });
+
+    // Friend request you sent was rejected
+    newSocket.on('friendRequestResponded', (data) => {
+      if (!isMounted) return;
+      if (data.action === 'rejected') {
+        toast('A friend request you sent was declined.', { icon: '😔' });
+      }
+    });
+
+    // Stats updated after a game ends
+    newSocket.on('statsUpdated', (newStats) => {
+      if (!isMounted) return;
+      setUserData(prev => prev ? { ...prev, stats: newStats } : prev);
+    });
+
+    // Leaderboard updated globally
+    newSocket.on('leaderboardUpdated', (newLeaderboard) => {
+      if (!isMounted) return;
+      setLeaderboard(newLeaderboard);
+    });
+
     async function fetchDashboardData() {
       try {
         const profileRes = await api.get('/v1/auth/me');
         if (profileRes.data?.user && isMounted) {
           setUserData(profileRes.data.user);
+          localUserData = profileRes.data.user;
+          // Register this user's socket so the server can push events to them
+          newSocket.emit('setUserId', { userId: profileRes.data.user.id, firstName: profileRes.data.user.firstName });
         }
 
         const [friendsRes, leaderboardRes, requestsRes] = await Promise.all([
@@ -120,7 +173,7 @@ const Dashboard = () => {
       newSocket.disconnect(); 
     };
   }, []);
-  
+
 
   const handleLogout = async () => {
     try {
@@ -159,12 +212,8 @@ const Dashboard = () => {
     try {
       await api.post('/v1/user/friends/respond', { requestId, action });
       toast.success(`Request ${action}ed!`);
-      // Refresh friends and requests list locally without full page reload
+      // Remove from local pending list immediately (friends list update comes via socket)
       setFriendRequests(prev => prev.filter(req => req._id !== requestId));
-      if (action === 'accept') {
-        const friendsRes = await api.get('/v1/user/friends').catch(() => null);
-        if (friendsRes?.data?.data) setFriends(friendsRes.data.data);
-      }
     } catch (err) {
       toast.error("Error responding to request");
     }
